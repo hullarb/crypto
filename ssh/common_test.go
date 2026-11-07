@@ -194,3 +194,20 @@ func TestKeyFormatAlgorithms(t *testing.T) {
 
 	}
 }
+
+func TestConfigCompressionDefaults(t *testing.T) {
+	var config Config
+	config.SetDefaults()
+	if !reflect.DeepEqual(config.Compression, []string{CompressionNone}) {
+		t.Fatalf("default Compression = %v, want [%q]", config.Compression, CompressionNone)
+	}
+
+	config = Config{
+		Compression: []string{"unsupported", CompressionZlibOpenSSH, CompressionZlib, CompressionNone},
+	}
+	config.SetDefaults()
+	want := []string{CompressionZlibOpenSSH, CompressionZlib, CompressionNone}
+	if !reflect.DeepEqual(config.Compression, want) {
+		t.Fatalf("filtered Compression = %v, want %v", config.Compression, want)
+	}
+}

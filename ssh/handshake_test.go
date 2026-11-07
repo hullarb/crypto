@@ -1203,8 +1203,8 @@ func TestStrictKEXMixed(t *testing.T) {
 		CiphersServerClient:     transport.config.Ciphers,
 		MACsClientServer:        transport.config.MACs,
 		MACsServerClient:        transport.config.MACs,
-		CompressionClientServer: supportedCompressions,
-		CompressionServerClient: supportedCompressions,
+		CompressionClientServer: transport.config.Compression,
+		CompressionServerClient: transport.config.Compression,
 		ServerHostKeyAlgos:      []string{KeyAlgoRSASHA256, KeyAlgoRSASHA512, KeyAlgoRSA},
 	}
 	packet := Marshal(msg)

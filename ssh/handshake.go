@@ -53,6 +53,12 @@ type keyingTransport interface {
 	setInitialKEXDone()
 }
 
+func setTransportAuthCompleted(conn keyingTransport) {
+	if t, ok := conn.(interface{ setAuthCompleted() }); ok {
+		t.setAuthCompleted()
+	}
+}
+
 // handshakeTransport implements rekeying on top of a keyingTransport
 // and offers a thread-safe writePacket() interface.
 type handshakeTransport struct {
@@ -441,6 +447,10 @@ func (t *handshakeTransport) readOnePacket(first bool) ([]byte, error) {
 		t.printPacket(p, false)
 	}
 
+	if p[0] == msgUserAuthSuccess {
+		setTransportAuthCompleted(t.conn)
+	}
+
 	if first && p[0] != msgKexInit {
 		return nil, fmt.Errorf("ssh: first packet should be msgKexInit")
 	}
@@ -503,8 +513,8 @@ func (t *handshakeTransport) sendKexInit() error {
 		CiphersServerClient:     t.config.Ciphers,
 		MACsClientServer:        t.config.MACs,
 		MACsServerClient:        t.config.MACs,
-		CompressionClientServer: supportedCompressions,
-		CompressionServerClient: supportedCompressions,
+		CompressionClientServer: t.config.Compression,
+		CompressionServerClient: t.config.Compression,
 	}
 	io.ReadFull(t.config.Rand, msg.Cookie[:])
 
@@ -631,6 +641,9 @@ func (t *handshakeTransport) writePacket(p []byte) error {
 		t.writeError = err
 		t.writeCond.Broadcast()
 		return err
+	}
+	if p[0] == msgUserAuthSuccess {
+		setTransportAuthCompleted(t.conn)
 	}
 
 	return nil

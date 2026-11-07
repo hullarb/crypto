@@ -46,6 +46,7 @@ type transport struct {
 
 	strictMode     bool
 	initialKEXDone bool
+	authComplete   bool
 }
 
 // packetCipher represents a combination of SSH encryption/MAC
@@ -66,9 +67,17 @@ type packetCipher interface {
 // keys, and can even have its own algorithms
 type connectionState struct {
 	packetCipher
-	seqNum           uint32
-	dir              direction
-	pendingKeyChange chan packetCipher
+	compression        *packetCompression
+	delayedCompression *packetCompression
+	seqNum             uint32
+	dir                direction
+	pendingKeyChange   chan transportState
+}
+
+type transportState struct {
+	packetCipher       packetCipher
+	compression        *packetCompression
+	delayedCompression bool
 }
 
 func (t *transport) setStrictMode() error {
@@ -83,6 +92,12 @@ func (t *transport) setInitialKEXDone() {
 	t.initialKEXDone = true
 }
 
+func (t *transport) setAuthCompleted() {
+	t.authComplete = true
+	t.reader.activateDelayedCompression()
+	t.writer.activateDelayedCompression()
+}
+
 // prepareKeyChange sets up key material for a keychange. The key changes in
 // both directions are triggered by reading and writing a msgNewKey packet
 // respectively.
@@ -91,15 +106,59 @@ func (t *transport) prepareKeyChange(algs *NegotiatedAlgorithms, kexResult *kexR
 	if err != nil {
 		return err
 	}
-	t.reader.pendingKeyChange <- ciph
+	comp, delayed, err := newPacketCompression(algs.Read.compression)
+	if err != nil {
+		return err
+	}
+	if t.authComplete {
+		delayed = false
+	}
+	t.reader.pendingKeyChange <- transportState{
+		packetCipher:       ciph,
+		compression:        comp,
+		delayedCompression: delayed,
+	}
 
 	ciph, err = newPacketCipher(t.writer.dir, algs.Write, kexResult)
 	if err != nil {
 		return err
 	}
-	t.writer.pendingKeyChange <- ciph
+	comp, delayed, err = newPacketCompression(algs.Write.compression)
+	if err != nil {
+		return err
+	}
+	if t.authComplete {
+		delayed = false
+	}
+	t.writer.pendingKeyChange <- transportState{
+		packetCipher:       ciph,
+		compression:        comp,
+		delayedCompression: delayed,
+	}
 
 	return nil
+}
+
+func (s *connectionState) activateDelayedCompression() {
+	if s.delayedCompression == nil {
+		return
+	}
+	s.compression = s.delayedCompression
+	s.delayedCompression = nil
+}
+
+func (s *connectionState) installTransportState(state transportState, strictMode bool) {
+	s.packetCipher = state.packetCipher
+	if state.delayedCompression {
+		s.compression = nil
+		s.delayedCompression = state.compression
+	} else {
+		s.compression = state.compression
+		s.delayedCompression = nil
+	}
+	if strictMode {
+		s.seqNum = 0
+	}
 }
 
 func (t *transport) printPacket(p []byte, write bool) {
@@ -140,7 +199,16 @@ func (t *transport) readPacket() (p []byte, err error) {
 func (s *connectionState) readPacket(r *bufio.Reader, strictMode bool) ([]byte, error) {
 	packet, err := s.packetCipher.readCipherPacket(s.seqNum, r)
 	s.seqNum++
-	if err == nil && len(packet) == 0 {
+	if err != nil {
+		return nil, err
+	}
+	if s.compression != nil {
+		packet, err = s.compression.decompressPacket(packet)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(packet) == 0 {
 		err = errors.New("ssh: zero length packet")
 	}
 
@@ -148,11 +216,8 @@ func (s *connectionState) readPacket(r *bufio.Reader, strictMode bool) ([]byte, 
 		switch packet[0] {
 		case msgNewKeys:
 			select {
-			case cipher := <-s.pendingKeyChange:
-				s.packetCipher = cipher
-				if strictMode {
-					s.seqNum = 0
-				}
+			case state := <-s.pendingKeyChange:
+				s.installTransportState(state, strictMode)
 			default:
 				return nil, errors.New("ssh: got bogus newkeys message")
 			}
@@ -189,7 +254,16 @@ func (t *transport) writePacket(packet []byte) error {
 func (s *connectionState) writePacket(w *bufio.Writer, rand io.Reader, packet []byte, strictMode bool) error {
 	changeKeys := len(packet) > 0 && packet[0] == msgNewKeys
 
-	err := s.packetCipher.writeCipherPacket(s.seqNum, w, rand, packet)
+	payload := packet
+	var err error
+	if s.compression != nil {
+		payload, err = s.compression.compressPacket(packet)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = s.packetCipher.writeCipherPacket(s.seqNum, w, rand, payload)
 	if err != nil {
 		return err
 	}
@@ -199,11 +273,8 @@ func (s *connectionState) writePacket(w *bufio.Writer, rand io.Reader, packet []
 	s.seqNum++
 	if changeKeys {
 		select {
-		case cipher := <-s.pendingKeyChange:
-			s.packetCipher = cipher
-			if strictMode {
-				s.seqNum = 0
-			}
+		case state := <-s.pendingKeyChange:
+			s.installTransportState(state, strictMode)
 		default:
 			panic("ssh: no key material for msgNewKeys")
 		}
@@ -218,11 +289,11 @@ func newTransport(rwc io.ReadWriteCloser, rand io.Reader, isClient bool) *transp
 		rand:      rand,
 		reader: connectionState{
 			packetCipher:     &streamPacketCipher{cipher: noneCipher{}},
-			pendingKeyChange: make(chan packetCipher, 1),
+			pendingKeyChange: make(chan transportState, 1),
 		},
 		writer: connectionState{
 			packetCipher:     &streamPacketCipher{cipher: noneCipher{}},
-			pendingKeyChange: make(chan packetCipher, 1),
+			pendingKeyChange: make(chan transportState, 1),
 		},
 		Closer: rwc,
 	}

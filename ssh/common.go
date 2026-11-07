@@ -21,9 +21,15 @@ import (
 
 // These are string constants in the SSH protocol.
 const (
-	compressionNone = "none"
-	serviceUserAuth = "ssh-userauth"
-	serviceSSH      = "ssh-connection"
+	CompressionNone        = "none"
+	CompressionZlib        = "zlib"
+	CompressionZlibOpenSSH = "zlib@openssh.com"
+
+	compressionNone        = CompressionNone
+	compressionZlib        = CompressionZlib
+	compressionZlibOpenSSH = CompressionZlibOpenSSH
+	serviceUserAuth        = "ssh-userauth"
+	serviceSSH             = "ssh-connection"
 )
 
 // The ciphers currently or previously implemented by this library, to use in
@@ -319,7 +325,19 @@ func InsecureAlgorithms() Algorithms {
 	}
 }
 
-var supportedCompressions = []string{compressionNone}
+var defaultCompressions = []string{compressionNone}
+
+var supportedCompressions = []string{
+	compressionNone,
+	compressionZlib,
+	compressionZlibOpenSSH,
+}
+
+var supportedCompression = map[string]bool{
+	compressionNone:        true,
+	compressionZlib:        true,
+	compressionZlibOpenSSH: true,
+}
 
 // algorithmsForKeyFormat returns the supported signature algorithms for a given
 // public key format (PublicKey.Type), in order of preference. See RFC 8332,
@@ -547,6 +565,10 @@ type Config struct {
 	// The allowed MAC algorithms. If unspecified then a sensible default is
 	// used. Unsupported values are silently ignored.
 	MACs []string
+
+	// The allowed compression algorithms. If unspecified, no compression is
+	// used. Unsupported values are silently ignored.
+	Compression []string
 }
 
 // SetDefaults sets sensible values for unset fields in config. This is
@@ -594,6 +616,17 @@ func (c *Config) SetDefaults() {
 		}
 	}
 	c.MACs = macs
+
+	if c.Compression == nil {
+		c.Compression = defaultCompressions
+	}
+	var compressions []string
+	for _, compression := range c.Compression {
+		if supportedCompression[compression] {
+			compressions = append(compressions, compression)
+		}
+	}
+	c.Compression = compressions
 
 	if c.RekeyThreshold == 0 {
 		// cipher specific default
